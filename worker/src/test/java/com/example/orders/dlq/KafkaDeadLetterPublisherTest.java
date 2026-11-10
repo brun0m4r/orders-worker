@@ -86,6 +86,15 @@ class KafkaDeadLetterPublisherTest {
     }
 
     @Test
+    void reasonIsCollapsedToASingleLine() {
+        senderSucceeds();
+
+        StepVerifier.create(publisher.publishRaw("k", "v", "unparseable: boom\n at [Source: x];\r\n   line: 1")).verifyComplete();
+
+        assertEquals("unparseable: boom at [Source: x]; line: 1", header(sent.get(0), "dlq-reason"));
+    }
+
+    @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
     void propagatesErrorWhenSendFails() {
         when(sender.send(any(Publisher.class))).thenReturn(Flux.error(new RuntimeException("broker down")));

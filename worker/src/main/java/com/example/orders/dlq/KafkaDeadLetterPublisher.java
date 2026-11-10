@@ -51,8 +51,10 @@ public class KafkaDeadLetterPublisher implements DeadLetterPublisher {
                 .doOnSuccess(v -> log.warn("Message {} sent to DLQ '{}': {}", key, topic, reason));
     }
 
+    /** Una sola línea (los mensajes de error pueden traer saltos de línea) y acotada en tamaño. */
     private static String truncate(String s) {
         if (s == null) return "";
-        return s.length() <= MAX_REASON_LENGTH ? s : s.substring(0, MAX_REASON_LENGTH);
+        String oneLine = s.replaceAll("\\s+", " ").trim();
+        return oneLine.length() <= MAX_REASON_LENGTH ? oneLine : oneLine.substring(0, MAX_REASON_LENGTH);
     }
 }

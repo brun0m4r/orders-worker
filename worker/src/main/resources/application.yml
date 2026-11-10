@@ -12,6 +12,8 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      timeout: 2s          # timeout de comandos: si Redis no responde, falla rápido
+      connect-timeout: 2s
 
 server:
   port: ${PORT:8080}
