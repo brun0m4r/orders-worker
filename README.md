@@ -14,6 +14,7 @@ Kafka (orders) ──► OrderConsumer ──► OrderHandler ──► Distribu
                                       MongoDB (orders)
 
   fallo transitorio ──► FailedOrderStore (Redis: JSON + ZSET) ◄── RetryScheduler (reintentos con backoff)
+  Redis caído / mensaje ilegible ──► DeadLetterPublisher ──► Kafka (orders-dlq)
 ```
 
 ## Estructura
@@ -97,9 +98,22 @@ persistido en Redis). Mongo tiene índice único en `orderId` y el procesamiento
 - Caché Caffeine de productos (TTL 5 min); los clientes **no** se cachean porque `active` puede cambiar.
 - Índices Mongo: único por `orderId` y compuesto `customerId + processedAt`.
 
+**Cola de mensajes muertos (DLQ)**: topic `orders-dlq` (`worker.kafka.dlq-topic`), con los encabezados
+`dlq-reason` y `dlq-at`. Recibe (1) los mensajes ilegibles y (2) los pedidos que fallaron cuando Redis tampoco
+pudo registrar el fallo. El offset se confirma solo cuando el mensaje quedó a salvo (procesado, en Redis o en el
+DLQ). Si ni Redis ni el DLQ responden, el error llega al consumidor: no confirma el offset y se re-suscribe con
+espera creciente, y Kafka reentrega desde el último offset confirmado, sin perder pedidos.
+
+Para revisar el DLQ:
+
+```bash
+docker exec orders-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic orders-dlq --from-beginning --property print.headers=true
+```
+
 ## Limitaciones / mejoras posibles
 
-- Los mensajes de Kafka no deserializables se descartan con log (sin DLQ).
+- Un mensaje en el DLQ no se reprocesa automáticamente; haría falta una herramienta o un consumidor aparte.
 - Si un pedido en `RETRYING` vuelve a llegar por Kafka, el contador de intentos se reinicia en ese camino.
 - Sin tests de integración con Testcontainers (requieren Docker); los tests actuales son unitarios.
 - La API Go usa datos en memoria; en un caso real consultaría una base de datos.

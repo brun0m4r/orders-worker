@@ -8,7 +8,7 @@ public final class TestProps {
 
     public static WorkerProperties with(String baseUrl) {
         return new WorkerProperties(
-                new WorkerProperties.Kafka("localhost:9092", "orders", "test", false),
+                new WorkerProperties.Kafka("localhost:9092", "orders", "test", false, "orders-dlq"),
                 new WorkerProperties.Enrichment(baseUrl, Duration.ofSeconds(1), 3,
                         Duration.ofMillis(10), Duration.ofMillis(50), Duration.ofMinutes(5), 100),
                 new WorkerProperties.Retry(3, Duration.ofSeconds(5), Duration.ofSeconds(30),
