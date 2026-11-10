@@ -1,10 +1,12 @@
 package com.example.orders.kafka;
 
 import com.example.orders.config.WorkerProperties;
+import com.example.orders.dlq.DeadLetterPublisher;
 import com.example.orders.model.OrderMessage;
 import com.example.orders.service.OrderHandler;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -20,6 +22,7 @@ import reactor.core.publisher.Mono;
 import reactor.kafka.receiver.KafkaReceiver;
 import reactor.kafka.receiver.ReceiverOptions;
 import reactor.kafka.receiver.ReceiverRecord;
+import reactor.util.retry.Retry;
 
 /**
  * Consume el tópico de pedidos. Procesa en paralelo entre particiones y en orden dentro de cada una.
@@ -37,12 +40,15 @@ public class OrderConsumer {
     private final WorkerProperties.Kafka cfg;
     private final OrderHandler handler;
     private final ObjectMapper mapper;
+    private final DeadLetterPublisher deadLetters;
     private Disposable subscription;
 
-    public OrderConsumer(WorkerProperties props, OrderHandler handler, ObjectMapper mapper) {
+    public OrderConsumer(WorkerProperties props, OrderHandler handler, ObjectMapper mapper,
+                         DeadLetterPublisher deadLetters) {
         this.cfg = props.kafka();
         this.handler = handler;
         this.mapper = mapper;
+        this.deadLetters = deadLetters;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -58,28 +64,38 @@ public class OrderConsumer {
         subscription = KafkaReceiver.create(options).receive()
                 .groupBy(r -> r.receiverOffset().topicPartition())
                 .flatMap(partition -> partition.concatMap(this::handleRecord), MAX_PARTITIONS)
-                .doOnError(e -> log.error("Kafka consumer error", e))
-                .retry() // si el stream cae, se vuelve a suscribir
+                .doOnError(e -> log.error("Kafka consumer error, will resubscribe (offset not committed)", e))
+                // si el stream cae (p. ej. Redis y DLQ caídos), se vuelve a suscribir con espera creciente;
+                // Kafka reentrega desde el último offset confirmado, así que no se pierde ningún pedido
+                .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(30)))
                 .subscribe();
         log.info("Consuming topic '{}' as group '{}'", cfg.topic(), cfg.groupId());
     }
 
+    /** El offset se confirma solo si el mensaje quedó manejado (procesado, en Redis o en el DLQ). */
     private Mono<Void> handleRecord(ReceiverRecord<String, String> record) {
-        return parse(record)
-                .flatMap(msg -> handler.handle(msg, 0))
-                .doFinally(s -> record.receiverOffset().acknowledge());
+        return process(record)
+                .then(Mono.<Void>fromRunnable(() -> record.receiverOffset().acknowledge()));
     }
 
-    private Mono<OrderMessage> parse(ReceiverRecord<String, String> record) {
+    Mono<Void> process(ReceiverRecord<String, String> record) {
+        OrderMessage msg;
         try {
-            OrderMessage msg = mapper.readValue(record.value(), OrderMessage.class);
-            return msg == null ? Mono.empty() : Mono.just(msg);
+            msg = mapper.readValue(record.value(), OrderMessage.class);
         } catch (Exception e) {
-            // mensaje ilegible: no tiene sentido reintentarlo
-            log.error("Discarding unparseable message at {}-{}@{}: {}",
-                    record.topic(), record.partition(), record.offset(), e.getMessage());
-            return Mono.empty();
+            return toDeadLetter(record, "unparseable: " + e.getMessage());
         }
+        if (msg == null) {
+            return toDeadLetter(record, "empty payload");
+        }
+        return handler.handle(msg, 0);
+    }
+
+    // mensaje ilegible: no tiene sentido reintentarlo, pero tampoco perderlo
+    private Mono<Void> toDeadLetter(ReceiverRecord<String, String> record, String reason) {
+        log.error("Unprocessable message at {}-{}@{}, sending to DLQ: {}",
+                record.topic(), record.partition(), record.offset(), reason);
+        return deadLetters.publishRaw(record.key(), record.value(), reason);
     }
 
     @PreDestroy

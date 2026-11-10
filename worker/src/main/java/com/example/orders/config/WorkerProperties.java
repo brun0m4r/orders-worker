@@ -15,7 +15,9 @@ public record WorkerProperties(
             @DefaultValue("localhost:9092") String bootstrapServers,
             @DefaultValue("orders") String topic,
             @DefaultValue("orders-worker") String groupId,
-            @DefaultValue("true") boolean enabled) {}
+            @DefaultValue("true") boolean enabled,
+            /** Topic para mensajes que no se pudieron procesar ni registrar (dead letter queue). */
+            @DefaultValue("orders-dlq") String dlqTopic) {}
 
     public record Enrichment(
             @DefaultValue("http://localhost:8081") String baseUrl,

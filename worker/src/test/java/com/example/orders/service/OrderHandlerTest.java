@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.example.orders.dlq.DeadLetterPublisher;
 import com.example.orders.failure.FailedOrderStore;
 import com.example.orders.failure.FailureService;
 import com.example.orders.lock.DistributedLock;
@@ -28,7 +29,8 @@ class OrderHandlerTest {
     DistributedLock lock = mock(DistributedLock.class);
     FailureService failures = mock(FailureService.class);
     FailedOrderStore store = mock(FailedOrderStore.class);
-    OrderHandler handler = new OrderHandler(processor, lock, failures, store);
+    DeadLetterPublisher deadLetters = mock(DeadLetterPublisher.class);
+    OrderHandler handler = new OrderHandler(processor, lock, failures, store, deadLetters);
 
     OrderMessage msg = new OrderMessage("order-1", "c", List.of(new OrderMessage.Item("p", 1)));
 
@@ -79,10 +81,32 @@ class OrderHandlerTest {
     }
 
     @Test
-    void redisFailureWhileRecordingDoesNotPropagate() {
+    void redisFailureWhileRecordingSendsOrderToDlq() {
         when(processor.process(msg)).thenReturn(Mono.error(new IllegalStateException("down")));
         when(failures.recordFailure(any(), any(), anyInt())).thenReturn(Mono.error(new RuntimeException("redis down")));
+        when(deadLetters.publish(eq(msg), any())).thenReturn(Mono.empty());
 
         StepVerifier.create(handler.handle(msg, 0)).verifyComplete();
+        verify(deadLetters).publish(eq(msg), org.mockito.ArgumentMatchers.contains("failure-store-unavailable"));
+    }
+
+    @Test
+    void errorPropagatesWhenDlqAlsoFails() {
+        when(processor.process(msg)).thenReturn(Mono.error(new IllegalStateException("down")));
+        when(failures.recordFailure(any(), any(), anyInt())).thenReturn(Mono.error(new RuntimeException("redis down")));
+        when(deadLetters.publish(eq(msg), any())).thenReturn(Mono.error(new RuntimeException("kafka down")));
+
+        // el consumidor no debe confirmar el offset: el error tiene que llegar hasta él
+        StepVerifier.create(handler.handle(msg, 0))
+                .expectErrorMessage("kafka down")
+                .verify();
+    }
+
+    @Test
+    void dlqIsNotUsedWhenFailureIsRecordedInRedis() {
+        when(processor.process(msg)).thenReturn(Mono.error(new IllegalStateException("down")));
+
+        StepVerifier.create(handler.handle(msg, 0)).verifyComplete();
+        verify(deadLetters, never()).publish(any(), any());
     }
 }

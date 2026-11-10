@@ -1,5 +1,6 @@
 package com.example.orders.service;
 
+import com.example.orders.dlq.DeadLetterPublisher;
 import com.example.orders.failure.FailedOrderStore;
 import com.example.orders.failure.FailureService;
 import com.example.orders.lock.DistributedLock;
@@ -14,7 +15,9 @@ import reactor.core.publisher.Mono;
 /**
  * Punto único de entrada para procesar un pedido (desde Kafka o desde el reintento):
  * lock distribuido -> proceso -> éxito limpia Redis; fallo se registra en Redis.
- * Nunca emite error: el consumidor siempre puede confirmar el offset.
+ * Los errores de un pedido se resuelven aquí (rechazo, reintento en Redis o DLQ), por lo que
+ * normalmente completa sin error y el consumidor puede confirmar el offset. Solo emite error
+ * si ni Redis ni el DLQ pudieron guardar el pedido: en ese caso NO se debe confirmar el offset.
  */
 @Service
 public class OrderHandler {
@@ -25,13 +28,16 @@ public class OrderHandler {
     private final DistributedLock lock;
     private final FailureService failures;
     private final FailedOrderStore store;
+    private final DeadLetterPublisher deadLetters;
 
     public OrderHandler(OrderProcessor processor, DistributedLock lock,
-                        FailureService failures, FailedOrderStore store) {
+                        FailureService failures, FailedOrderStore store,
+                        DeadLetterPublisher deadLetters) {
         this.processor = processor;
         this.lock = lock;
         this.failures = failures;
         this.store = store;
+        this.deadLetters = deadLetters;
     }
 
     public Mono<Void> handle(OrderMessage msg, int previousAttempts) {
@@ -45,10 +51,11 @@ public class OrderHandler {
                 })
                 .onErrorResume(OrderValidationException.class, e -> failures.reject(msg, e))
                 .onErrorResume(e -> failures.recordFailure(msg, e, previousAttempts))
-                // si hasta Redis falla, no tumbamos el consumidor
+                // Redis no pudo registrar el fallo: última red de seguridad, el mensaje va al DLQ.
+                // Si el DLQ también falla, el error se propaga y el consumidor no confirma el offset.
                 .onErrorResume(e -> {
-                    log.error("Could not record failure for order {}: {}", id, e.toString());
-                    return Mono.empty();
+                    log.error("Could not record failure for order {}, sending to DLQ: {}", id, e.toString());
+                    return deadLetters.publish(msg, "failure-store-unavailable: " + e);
                 });
     }
 }
