@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: orders-worker
+  main:
+    web-application-type: reactive
+  data:
+    mongodb:
+      uri: ${MONGO_URI:mongodb://localhost:27017/orders}
+      auto-index-creation: true
+      representation:
+        big-decimal: decimal128
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+worker:
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    topic: ${KAFKA_TOPIC:orders}
+    group-id: ${KAFKA_GROUP_ID:orders-worker}
+  enrichment:
+    base-url: ${ENRICHMENT_URL:http://localhost:8081}
+    timeout: 2s
+    max-retries: 3
+    initial-backoff: 200ms
+    max-backoff: 2s
+    product-cache-ttl: 5m
+  retry:
+    max-attempts: 5
+    base-delay: 5s
+    max-delay: 5m
+    poll-interval: 3s
+  lock:
+    ttl: 60s
